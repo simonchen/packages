@@ -1,0 +1,11 @@
+--- a/CRT.c	2023-02-05 06:26:23.000000000 +0800
++++ b/CRT.c	2026-06-02 13:30:44.987157554 +0800
+@@ -134,7 +134,7 @@
+       [METER_VALUE] = A_BOLD | ColorPair(Cyan, Black),
+       [METER_VALUE_ERROR] = A_BOLD | ColorPair(Red, Black),
+       [METER_VALUE_IOREAD] = ColorPair(Green, Black),
+-      [METER_VALUE_IOWRITE] = A_BOLD | ColorPair(Blue, Black),
++      [METER_VALUE_IOWRITE] = ColorPair(Yellow, Black),
+       [METER_VALUE_NOTICE] = A_BOLD | ColorPair(White, Black),
+       [METER_VALUE_OK] = ColorPair(Green, Black),
+       [METER_VALUE_WARN] = A_BOLD | ColorPair(Yellow, Black),
