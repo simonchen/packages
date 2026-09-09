@@ -1,0 +1,76 @@
+--- a/linux/LinuxProcessList.c	2023-02-05 06:26:23.000000000 +0800
++++ b/linux/LinuxProcessList.c	2026-05-29 01:01:17.261063261 +0800
+@@ -2189,6 +2189,35 @@
+    return 0;
+ }
+ 
++static double getDynamicCPUFrequency(void) {
++   double freqMHz = NAN;
++   FILE* clkFile = fopen("/sys/kernel/debug/clk/clk_dump", "r");
++   if (clkFile == NULL)
++      return freqMHz;
++
++   char* line = NULL;
++   size_t len = 0;
++
++   if (getline(&line, &len, clkFile) != -1) {
++      char* cpuPos = strstr(line, "\"cpu\"");
++      if (cpuPos != NULL) {
++         char* ratePos = strstr(cpuPos, "\"rate\"");
++         if (ratePos != NULL) {
++            unsigned long long rateHz = 0;
++            if (sscanf(ratePos, "\"rate\": %llu", &rateHz) == 1) {
++               if (rateHz > 0) {
++                  freqMHz = (double)rateHz / 1000000.0;
++               }
++            }
++         }
++      }
++   }
++
++   free(line);
++   fclose(clkFile);
++   return freqMHz;
++}
++
+ static void scanCPUFrequencyFromCPUinfo(LinuxProcessList* this) {
+    FILE* file = fopen(PROCCPUINFOFILE, "r");
+    if (file == NULL)
+@@ -2198,6 +2227,9 @@
+    int numCPUsWithFrequency = 0;
+    double totalFrequency = 0;
+    int cpuid = -1;
++   int numCPUsWithFallbackFrequency = 0;
++   double totalFallbackFrequency = 0;
++   double fallbackFreq = getDynamicCPUFrequency();
+ 
+    while (!feof(file)) {
+       double frequency;
+@@ -2207,6 +2239,17 @@
+          break;
+ 
+       if (sscanf(buffer, "processor : %d", &cpuid) == 1) {
++         if (!isnan(fallbackFreq)) {
++            if (cpuid < 0 || (unsigned int)cpuid > (existingCPUs - 1)) {
++               continue;
++            }
++
++            CPUData* cpuData = &(this->cpuData[cpuid + 1]);
++            cpuData->frequency = fallbackFreq;
++
++            numCPUsWithFallbackFrequency++;
++            totalFallbackFrequency += fallbackFreq;
++         }
+          continue;
+       } else if (
+          (sscanf(buffer, "cpu MHz : %lf", &frequency) == 1) ||
+@@ -2229,6 +2272,9 @@
+    }
+    fclose(file);
+ 
++   if (numCPUsWithFallbackFrequency > 0) {
++      this->cpuData[0].frequency = totalFallbackFrequency / numCPUsWithFallbackFrequency;
++   }
+    if (numCPUsWithFrequency > 0) {
+       this->cpuData[0].frequency = totalFrequency / numCPUsWithFrequency;
+    }

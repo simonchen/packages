@@ -1,0 +1,218 @@
+--- a/netbsd/Platform.c	2023-02-05 06:26:23.000000000 +0800
++++ b/netbsd/Platform.c	2026-05-28 20:26:27.594168298 +0800
+@@ -179,6 +179,7 @@
+    &BlankMeter_class,
+    &DiskIOMeter_class,
+    &NetworkIOMeter_class,
++   &NetworkIOTotalMeter_class,
+    NULL
+ };
+ 
+--- a/pcp/Platform.c	2023-02-05 06:26:23.000000000 +0800
++++ b/pcp/Platform.c	2026-05-28 20:23:26.793966543 +0800
+@@ -113,6 +113,7 @@
+    &ZramMeter_class,
+    &DiskIOMeter_class,
+    &NetworkIOMeter_class,
++   &&NetworkIOTotalMeter_class,
+    &SysArchMeter_class,
+    NULL
+ };
+--- a/linux/Platform.c	2023-02-05 06:26:23.000000000 +0800
++++ b/linux/Platform.c	2026-05-28 20:22:21.858985608 +0800
+@@ -247,6 +247,7 @@
+    &ZramMeter_class,
+    &DiskIOMeter_class,
+    &NetworkIOMeter_class,
++   &NetworkIOTotalMeter_class,
+    &SELinuxMeter_class,
+    &SystemdMeter_class,
+    NULL
+--- a/freebsd/Platform.c	2023-02-05 06:26:23.000000000 +0800
++++ b/freebsd/Platform.c	2026-05-28 20:23:57.027347473 +0800
+@@ -131,6 +131,7 @@
+    &ZfsCompressedArcMeter_class,
+    &DiskIOMeter_class,
+    &NetworkIOMeter_class,
++   &NetworkIOTotalMeter_class,
+    NULL
+ };
+ 
+--- a/Meter.c	2023-02-05 06:26:23.000000000 +0800
++++ b/Meter.c	2026-05-28 21:12:19.749802119 +0800
+@@ -78,6 +78,38 @@
+    return snprintf(buffer, size, "%.*f%c", precision, (double) value / powi, *prefix);
+ }
+ 
++int Meter_humanUnit64(char* buffer, uint64_t value, size_t size) {
++   const char* prefix = "KMGTPEZY";
++   uint64_t powi = 1;
++   unsigned int powj = 1;
++   unsigned int precision = 2;
++
++   if (value < 1024) {
++      return snprintf(buffer, size, "%lluB", value);
++   }
++
++   for (;;) {
++      if (value / 1024 < powi)
++         break;
++      if (*prefix == '\0')
++         break;
++
++      powi *= 1024;
++      ++prefix;
++   }
++
++   if (*prefix == 'K')
++      precision = 0;
++
++   for (; precision > 0; precision--) {
++      powj *= 10;
++      if (value / powi < powj)
++         break;
++   }
++
++   return snprintf(buffer, size, "%.*f%c", precision, (double)value / powi, *prefix);
++}
++
+ void Meter_delete(Object* cast) {
+    if (!cast)
+       return;
+--- a/Meter.h	2023-02-05 06:26:23.000000000 +0800
++++ b/Meter.h	2026-05-28 21:14:55.283693305 +0800
+@@ -146,6 +146,7 @@
+ Meter* Meter_new(const ProcessList* pl, unsigned int param, const MeterClass* type);
+ 
+ int Meter_humanUnit(char* buffer, unsigned long int value, size_t size);
++int Meter_humanUnit64(char* buffer, uint64_t value, size_t size);
+ 
+ void Meter_delete(Object* cast);
+ 
+--- a/NetworkIOMeter.h	2023-02-05 06:26:23.000000000 +0800
++++ b/NetworkIOMeter.h	2026-05-28 20:24:20.772429164 +0800
+@@ -12,5 +12,6 @@
+ } NetworkIOData;
+ 
+ extern const MeterClass NetworkIOMeter_class;
++extern const MeterClass NetworkIOTotalMeter_class;
+ 
+ #endif /* HEADER_NetworkIOMeter */
+--- a/NetworkIOMeter.c	2023-02-05 06:26:23.000000000 +0800
++++ b/NetworkIOMeter.c	2026-05-28 22:04:53.119700818 +0800
+@@ -25,6 +25,11 @@
+ static uint32_t cached_txb_diff;
+ static uint32_t cached_txp_diff;
+ 
++static uint64_t _cached_rxb_total;
++static uint64_t _cached_rxp_total;
++static uint64_t _cached_txb_total;
++static uint64_t _cached_txp_total;
++
+ static void NetworkIOMeter_updateValues(Meter* this) {
+    const ProcessList* pl = this->pl;
+    static uint64_t cached_last_update = 0;
+@@ -150,6 +155,83 @@
+    RichString_appendnAscii(out, CRT_colors[METER_TEXT], buffer, len);
+ }
+ 
++static void NetworkIOTotalMeter_updateValues(Meter* this) {
++   const ProcessList* pl = this->pl;
++   static uint64_t cached_last_update = 0;
++
++   uint64_t passedTimeInMs = pl->realtimeMs - cached_last_update;
++
++   /* update only every 500ms to have a sane span for rate calculation */
++   if (passedTimeInMs > 500) {
++
++      NetworkIOData data;
++      if (!Platform_getNetworkIO(&data)) {
++         status = RATESTATUS_NODATA;
++      } else if (cached_last_update == 0) {
++         status = RATESTATUS_INIT;
++      } else if (passedTimeInMs > 30000) {
++         status = RATESTATUS_STALE;
++      } else {
++         status = RATESTATUS_DATA;
++      }
++
++      cached_last_update = pl->realtimeMs;
++
++      if (status == RATESTATUS_NODATA) {
++         xSnprintf(this->txtBuffer, sizeof(this->txtBuffer), "no data");
++         return;
++      }
++
++      _cached_rxb_total = data.bytesReceived;
++      _cached_rxp_total = data.packetsReceived;
++      _cached_txb_total = data.bytesTransmitted;
++      _cached_txp_total = data.packetsTransmitted;
++   }
++
++   if (status == RATESTATUS_INIT) {
++      xSnprintf(this->txtBuffer, sizeof(this->txtBuffer), "init");
++      return;
++   }
++   if (status == RATESTATUS_STALE) {
++      xSnprintf(this->txtBuffer, sizeof(this->txtBuffer), "stale");
++      return;
++   }
++
++}
++
++static void NetworkIOTotalMeter_display(ATTR_UNUSED const Object* cast, RichString* out) {
++   switch (status) {
++   case RATESTATUS_NODATA:
++      RichString_writeAscii(out, CRT_colors[METER_VALUE_ERROR], "no data");
++      return;
++   case RATESTATUS_INIT:
++      RichString_writeAscii(out, CRT_colors[METER_VALUE], "initializing...");
++      return;
++   case RATESTATUS_STALE:
++      RichString_writeAscii(out, CRT_colors[METER_VALUE_WARN], "stale data");
++      return;
++   case RATESTATUS_DATA:
++      break;
++   }
++
++   char buffer[64];
++   int len;
++
++   RichString_writeAscii(out, CRT_colors[METER_TEXT], "rx: ");
++   Meter_humanUnit64(buffer, _cached_rxb_total/ONE_K, sizeof(buffer));
++   RichString_appendAscii(out, CRT_colors[METER_VALUE_IOREAD], buffer);
++   RichString_appendAscii(out, CRT_colors[METER_VALUE_IOREAD], "iB");
++
++   RichString_appendAscii(out, CRT_colors[METER_TEXT], " tx: ");
++   Meter_humanUnit64(buffer, _cached_txb_total/ONE_K, sizeof(buffer));
++   RichString_appendAscii(out, CRT_colors[METER_VALUE_IOWRITE], buffer);
++   RichString_appendAscii(out, CRT_colors[METER_VALUE_IOWRITE], "iB");
++
++   len = xSnprintf(buffer, sizeof(buffer), " (%llu/%llu pkts) ", _cached_rxp_total, _cached_txp_total);
++   RichString_appendnAscii(out, CRT_colors[METER_TEXT], buffer, len);
++}
++
++
+ const MeterClass NetworkIOMeter_class = {
+    .super = {
+       .extends = Class(Meter),
+@@ -165,3 +247,19 @@
+    .uiName = "Network IO",
+    .caption = "Network: "
+ };
++
++const MeterClass NetworkIOTotalMeter_class = {
++   .super = {
++      .extends = Class(Meter),
++      .delete = Meter_delete,
++      .display = NetworkIOTotalMeter_display
++   },
++   .updateValues = NetworkIOTotalMeter_updateValues,
++   .defaultMode = TEXT_METERMODE,
++   .maxItems = 2,
++   .total = 100.0,
++   .attributes = NetworkIOMeter_attributes,
++   .name = "NetworkIOTotal",
++   .uiName = "Network IO (Total)",
++   .caption = "Network Total: "
++};
